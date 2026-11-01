@@ -81,6 +81,11 @@ on:
         required: false
         type: boolean
         default: false
+      use_full_lto:
+        description: "FullLTO (GKID-style, Kleaf defconfig + 32 GB swap)"
+        required: false
+        type: boolean
+        default: false
       page_size:
         description: "ARM64 page size: 4k (default) or 16k (Kleaf --page_size)"
         required: false
@@ -151,9 +156,16 @@ jobs:
           testing: false
 
       - name: Setup more Swap (for LTO)
+        if: ${{ !inputs.use_full_lto }}
         uses: pierotofy/set-swap-space@master
         with:
           swap-size-gb: 16
+
+      - name: Setup more Swap (for FullLTO)
+        if: ${{ inputs.use_full_lto }}
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 32
 
       - name: Setup Build Environment
         uses: ./.github/actions/setup-build-environment
@@ -477,6 +489,14 @@ jobs:
           version: ${{ inputs.version }}
           allow_version_mismatch: true
 
+      - name: Enable FullLTO (GKID-style)
+        if: ${{ inputs.use_full_lto }}
+        uses: ./.github/actions/set-kernel-config
+        with:
+          config_list: |
+            CONFIG_LTO_NONE=n
+            CONFIG_LTO_CLANG_THIN=n
+            CONFIG_LTO_CLANG_FULL=y
       - name: Build Normal Kernel
         env:
           SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
@@ -487,6 +507,26 @@ jobs:
         with:
           version: ${{ inputs.version }}
           page_size: ${{ inputs.page_size }}
+      - name: Verify FullLTO config
+        if: ${{ inputs.use_full_lto }}
+        shell: bash
+        working-directory: ${{ github.workspace }}/kernel
+        run: |
+          set -euo pipefail
+          CONFIG_FILE=""
+          for candidate in bazel-bin/common/kernel_aarch64_config/out_dir/.config /home/runner/out/.config; do
+            if [ -f "$candidate" ]; then CONFIG_FILE="$candidate"; break; fi
+          done
+          if [ -z "$CONFIG_FILE" ]; then
+            CONFIG_FILE="$(find bazel-bin/common /home/runner/out -maxdepth 4 -name .config -type f 2>/dev/null | head -n1 || true)"
+          fi
+          if [ -z "$CONFIG_FILE" ]; then
+            echo "ERROR: could not locate .config to verify FullLTO" >&2
+            exit 1
+          fi
+          echo "--- LTO config block from $CONFIG_FILE ---"
+          grep -E '^#? ?CONFIG_LTO' "$CONFIG_FILE" || true
+          grep -qx 'CONFIG_LTO_CLANG_FULL=y' "$CONFIG_FILE"
 
       - name: Get Cache Stats
         uses: ./.github/actions/cache-stats
